@@ -38,15 +38,15 @@ from suds.sax.document import Document
 from suds.sax.parser import Parser
 from suds.options import Options
 from suds.properties import Unskin
-from urlparse import urlparse
 from copy import deepcopy
+from suds.plugin import PluginContainer
 from logging import getLogger
 
 log = getLogger(__name__)
 
 
 class Client(object):
-    """ 
+    """
     A lightweight web services client.
     I{(2nd generation)} API.
     @ivar wsdl: The WSDL object.
@@ -109,6 +109,8 @@ class Client(object):
         self.set_options(**kwargs)
         reader = DefinitionsReader(options, Definitions)
         self.wsdl = reader.open(url)
+        plugins = PluginContainer(options.plugins)
+        plugins.init.initialized(wsdl=self.wsdl)
         self.factory = Factory(self.wsdl)
         self.service = ServiceSelector(self, self.wsdl.services)
         self.sd = []
@@ -286,7 +288,7 @@ class ServiceSelector:
         @param name: The name of a method.
         @type name: str
         @return: A L{PortSelector}.
-        @rtype: L{PortSelector}. 
+        @rtype: L{PortSelector}.
         """
         default = self.__ds()
         if default is None:
@@ -297,14 +299,14 @@ class ServiceSelector:
     
     def __getitem__(self, name):
         """
-        Provides selection of the I{service} by name (string) or 
+        Provides selection of the I{service} by name (string) or
         index (integer).  In cases where only (1) service is defined
         or a I{default} has been specified, the request is forwarded
         to the L{PortSelector}.
         @param name: The name (or index) of a service.
         @type name: (int|str)
         @return: A L{PortSelector} for the specified service.
-        @rtype: L{PortSelector}. 
+        @rtype: L{PortSelector}.
         """
         if len(self.__services) == 1:
             port = self.__find(0)
@@ -321,7 +323,7 @@ class ServiceSelector:
         @param name: The name (or index) of a service.
         @type name: (int|str)
         @return: A L{PortSelector} for the found service.
-        @rtype: L{PortSelector}. 
+        @rtype: L{PortSelector}.
         """
         service = None
         if not len(self.__services):
@@ -345,7 +347,7 @@ class ServiceSelector:
         """
         Get the I{default} service if defined in the I{options}.
         @return: A L{PortSelector} for the I{default} service.
-        @rtype: L{PortSelector}. 
+        @rtype: L{PortSelector}.
         """
         ds = self.__client.options.service
         if ds is None:
@@ -390,7 +392,7 @@ class PortSelector:
         @param name: The name of a method.
         @type name: str
         @return: A L{MethodSelector}.
-        @rtype: L{MethodSelector}. 
+        @rtype: L{MethodSelector}.
         """
         default = self.__dp()
         if default is None:
@@ -401,14 +403,14 @@ class PortSelector:
     
     def __getitem__(self, name):
         """
-        Provides selection of the I{port} by name (string) or 
+        Provides selection of the I{port} by name (string) or
         index (integer).  In cases where only (1) port is defined
         or a I{default} has been specified, the request is forwarded
         to the L{MethodSelector}.
         @param name: The name (or index) of a port.
         @type name: (int|str)
         @return: A L{MethodSelector} for the specified port.
-        @rtype: L{MethodSelector}. 
+        @rtype: L{MethodSelector}.
         """
         default = self.__dp()
         if default is None:
@@ -422,7 +424,7 @@ class PortSelector:
         @param name: The name (or index) of a port.
         @type name: (int|str)
         @return: A L{MethodSelector} for the found port.
-        @rtype: L{MethodSelector}. 
+        @rtype: L{MethodSelector}.
         """
         port = None
         if not len(self.__ports):
@@ -448,7 +450,7 @@ class PortSelector:
         """
         Get the I{default} port if defined in the I{options}.
         @return: A L{MethodSelector} for the I{default} port.
-        @rtype: L{MethodSelector}. 
+        @rtype: L{MethodSelector}.
         """
         dp = self.__client.options.port
         if dp is None:
@@ -589,24 +591,26 @@ class SoapClient:
         timer.start()
         result = None
         binding = self.method.binding.input
-        msg = binding.get_message(self.method, args, kwargs)
+        soapenv = binding.get_message(self.method, args, kwargs)
         timer.stop()
         metrics.log.debug(
-                "message for '%s' created: %s",
-                self.method.name, timer)
+            "message for '%s' created: %s",
+            self.method.name,
+            timer)
         timer.start()
-        result = self.send(msg)
+        result = self.send(soapenv)
         timer.stop()
         metrics.log.debug(
-                "method '%s' invoked: %s",
-                self.method.name, timer)
+            "method '%s' invoked: %s",
+            self.method.name,
+            timer)
         return result
-    
-    def send(self, msg):
+
+    def send(self, soapenv):
         """
         Send soap message.
-        @param msg: A soap message to send.
-        @type msg: basestring
+        @param soapenv: A soap envelope to send.
+        @type soapenv: L{Document}
         @return: The reply to the sent message.
         @rtype: I{builtin} or I{subclass of} L{Object}
         """
@@ -615,12 +619,25 @@ class SoapClient:
         binding = self.method.binding.input
         transport = self.options.transport
         retxml = self.options.retxml
-        log.debug('sending to (%s)\nmessage:\n%s', location, msg)
+        prettyxml = self.options.prettyxml
+        log.debug('sending to (%s)\nmessage:\n%s', location, soapenv)
         try:
-            self.last_sent(Document(msg))
-            request = Request(location, str(msg))
+            self.last_sent(soapenv)
+            plugins = PluginContainer(self.options.plugins)
+            plugins.message.marshalled(envelope=soapenv.root())
+            if prettyxml:
+                soapenv = soapenv.str()
+            else:
+                soapenv = soapenv.plain()
+            soapenv = soapenv.encode('utf-8')
+            result = plugins.message.sending(envelope=soapenv)
+            if (result):
+                soapenv = result.envelope
+            request = Request(location, soapenv)
             request.headers = self.headers()
             reply = transport.send(request)
+            ctx = plugins.message.received(reply=reply.message)
+            reply.message = ctx.reply
             if retxml:
                 result = reply.message
             else:
@@ -640,7 +657,7 @@ class SoapClient:
         @rtype: dict
         """
         action = self.method.soap.action
-        stock = { 'Content-Type' : 'text/xml', 'SOAPAction': action }
+        stock = {'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': action}
         result = dict(stock, **self.options.headers)
         log.debug('headers = %s', result)
         return result
@@ -650,24 +667,26 @@ class SoapClient:
         Request succeeded, process the reply
         @param binding: The binding to be used to process the reply.
         @type binding: L{bindings.binding.Binding}
+        @param reply: The raw reply text.
+        @type reply: str
         @return: The method result.
         @rtype: I{builtin}, L{Object}
         @raise WebFault: On server.
         """
         log.debug('http succeeded:\n%s', reply)
+        plugins = PluginContainer(self.options.plugins)
         if len(reply) > 0:
-            r, p = binding.get_reply(self.method, reply)
-            self.last_received(r)
-            if self.options.faults:
-                return p
-            else:
-                return (200, p)
+            reply, result = binding.get_reply(self.method, reply)
+            self.last_received(reply)
         else:
-            if self.options.faults:
-                return None
-            else:
-                return (200, None)
-        
+            result = None
+        ctx = plugins.message.unmarshalled(reply=result)
+        result = ctx.reply
+        if self.options.faults:
+            return result
+        else:
+            return (200, result)
+
     def failed(self, binding, error):
         """
         Request failed, process reply based on reason
